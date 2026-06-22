@@ -891,6 +891,7 @@ async def list_pipelineruns(namespace: str, limit: Optional[int] = 200) -> List[
 
         logger.info(f"Successfully processed {processed_count} PipelineRuns from namespace '{namespace}' "
                    f"({error_count} errors encountered)")
+        result.sort(key=lambda x: x.get("started_at") or "", reverse=True)
         return result
 
     except ApiException as e:
@@ -2736,7 +2737,7 @@ async def analyze_failed_pipeline(namespace: str, pipeline_run: str) -> Dict[str
         # Find failed tasks
         failed_tasks = [
             task for task in pipeline_details.get("task_runs", [])
-            if task.get("status") != "Succeeded"
+            if task.get("status") not in ("Succeeded", "Running", "Started", "Pending", "TaskRunPending", None)
         ]
 
         results = {
@@ -2840,7 +2841,9 @@ async def analyze_failed_pipeline(namespace: str, pipeline_run: str) -> Dict[str
 
         # Determine root cause and recommend actions
         results["probable_root_cause"] = determine_root_cause(results)
-        results["recommended_actions"] = recommend_actions(results)
+        actions = recommend_actions(results)
+        seen = set()
+        results["recommended_actions"] = [a for a in actions if a not in seen and not seen.add(a)]
 
         logger.info(f"Pipeline analysis complete. Root cause: {results['probable_root_cause'][:50]}...")
         return results
@@ -3623,12 +3626,15 @@ async def get_tekton_pipeline_runs_status(
                 f"Found {total_long_running} long-running pipelines >1 hour (showing top {shown} longest)"
             )
 
-        # Add summary insight
+        # Add summary insight — exclude running pipelines from success rate
         succeeded_prs = analysis['pipeline_runs']['by_status'].get('Succeeded_True', 0)
         running_prs = analysis['pipeline_runs']['by_status'].get('Succeeded_Unknown', 0)
-        if analysis['pipeline_runs']['total'] > 0:
-            success_rate = (succeeded_prs / analysis['pipeline_runs']['total']) * 100
-            analysis['insights'].append(f"Pipeline success rate: {success_rate:.1f}%")
+        completed_prs = analysis['pipeline_runs']['total'] - running_prs
+        if completed_prs > 0:
+            success_rate = (succeeded_prs / completed_prs) * 100
+            analysis['insights'].append(f"Pipeline success rate: {success_rate:.1f}% ({running_prs} still running)")
+        elif running_prs > 0:
+            analysis['insights'].append(f"All {running_prs} pipelines still running — no completed runs to measure")
 
         logger.info(f"Tekton status analysis complete: {len(analysis['insights'])} insights generated")
         return analysis
@@ -6614,7 +6620,6 @@ async def conservative_namespace_overview(
                     summary_level="brief",
                     focus_areas=focus_areas,
                     max_context_tokens=tokens_per_pod,
-                    tail_lines=200  # Conservative line limit
                 )
 
                 if "error" not in pod_analysis:
