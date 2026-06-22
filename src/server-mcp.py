@@ -3710,33 +3710,38 @@ async def detect_log_anomalies(
 
         # Define severity thresholds
         thresholds = {
-            "low": {"error_rate": 0.05, "repetition_rate": 0.3, "time_gap": 300},
-            "medium": {"error_rate": 0.1, "repetition_rate": 0.5, "time_gap": 180},
-            "high": {"error_rate": 0.2, "repetition_rate": 0.7, "time_gap": 60}
+            "low": {"error_rate": 0.05, "warn_rate": 0.30, "repetition_rate": 0.3, "time_gap": 300},
+            "medium": {"error_rate": 0.1, "warn_rate": 0.60, "repetition_rate": 0.5, "time_gap": 180},
+            "high": {"error_rate": 0.2, "warn_rate": 0.90, "repetition_rate": 0.7, "time_gap": 60}
         }
 
         threshold_config = thresholds.get(severity_threshold, thresholds["medium"])
 
         # 1. Analyze error frequency patterns
-        # Map patterns to human-readable category names
+        # First-match-wins: more specific patterns before generic ones
         error_pattern_map = {
-            r"(?i)(error|exception|failed|fatal|panic|critical)": "error",
-            r"(?i)(timeout|connection\s+refused|connection\s+reset)": "timeout",
-            r"(?i)(out\s+of\s+memory|memory\s+limit|oom)": "memory",
-            r"(?i)(permission\s+denied|access\s+denied|unauthorized)": "permission",
-            r"(?i)(not\s+found|missing|invalid|corrupt)": "not_found"
+            r"(?i)\b(out\s+of\s+memory|memory\s+limit|oom(?:killed)?)\b": "memory",
+            r"(?i)\b(timeout)\b": "timeout",
+            r"(?i)\b(connection\s+refused|connection\s+reset)\b": "connection",
+            r"(?i)\b(permission\s+denied|access\s+denied|unauthorized)\b": "permission",
+            r"(?i)\b(not\s+found|missing|invalid|corrupt)\b": "not_found",
+            r"(?i)\b(error|exception|failed|fatal|panic|critical)\b": "error",
         }
-        error_patterns = list(error_pattern_map.keys())
 
         error_counts = {}
         error_lines = []
+        warn_lines = 0
 
         for i, line in enumerate(log_lines):
-            for pattern in error_patterns:
+            matched = False
+            for pattern, label in error_pattern_map.items():
                 if re.search(pattern, line):
                     error_lines.append((i, line))
-                    pattern_key = error_pattern_map.get(pattern, "other")
-                    error_counts[pattern_key] = error_counts.get(pattern_key, 0) + 1
+                    error_counts[label] = error_counts.get(label, 0) + 1
+                    matched = True
+                    break
+            if not matched and re.search(r"(?i)\bwarn(?:ing)?\b", line):
+                warn_lines += 1
 
         unique_error_line_indices = set(line[0] for line in error_lines)
         error_rate = len(unique_error_line_indices) / total_lines
@@ -3750,6 +3755,15 @@ async def detect_log_anomalies(
                     "error_patterns": error_counts,
                     "sample_errors": [line[1][:200] for line in error_lines[:5]]  # Truncate long lines
                 }
+            })
+
+        warn_rate = warn_lines / total_lines if total_lines else 0
+        if warn_rate > threshold_config["warn_rate"]:
+            anomalies.append({
+                "type": "high_warn_rate",
+                "severity": "medium" if warn_rate > 0.5 else "low",
+                "description": f"High warning rate detected: {warn_rate:.2%} ({warn_lines}/{total_lines} lines)",
+                "details": {"warn_rate": warn_rate, "warn_count": warn_lines}
             })
 
         # 2. Detect repetitive log patterns (potential loops or spam)
