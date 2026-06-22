@@ -7826,10 +7826,12 @@ async def advanced_event_analytics(
     logger.info(f"[{tool_name}] Starting advanced analytics for namespace '{namespace}'")
 
     try:
-        # Step 1: Get base event data using progressive analysis
+        # Step 1: Get base event data — scale progressive analysis to depth
+        depth_to_level = {"basic": "overview", "comprehensive": "detailed", "deep": "deep_dive"}
+        base_level = depth_to_level.get(analysis_depth, "detailed")
         base_result = await progressive_event_analysis(
             namespace=namespace,
-            analysis_level="deep_dive",
+            analysis_level=base_level,
             time_period=time_period
         )
 
@@ -7913,6 +7915,8 @@ async def advanced_event_analytics(
             ml_detector = MLPatternDetector(events_data)
             ml_patterns = ml_detector.detect_patterns()
             analytics_result["ml_patterns"] = ml_patterns
+        else:
+            analytics_result["ml_patterns"] = {"disabled": True}
 
         # Step 3: Log correlation
         if include_log_correlation:
