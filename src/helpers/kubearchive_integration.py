@@ -8,6 +8,7 @@ KubeArchive stores Kubernetes resources off-cluster and provides a REST API
 for accessing historical resource states and logs.
 """
 
+import asyncio
 import os
 import logging
 import aiohttp
@@ -16,7 +17,6 @@ import base64
 import tempfile
 import subprocess
 import socket
-import time
 import yaml
 from typing import Dict, List, Optional, Any, Tuple, Union
 from datetime import datetime
@@ -533,8 +533,10 @@ class KubeArchiveEndpointDiscovery:
                 stderr=subprocess.PIPE
             )
 
-            # Wait a bit for port-forward to establish
-            time.sleep(2)
+            # Wait for port-forward to establish.
+            # Using asyncio.sleep (not time.sleep) to avoid blocking the event loop,
+            # which would freeze all concurrent MCP tool requests for the duration.
+            await asyncio.sleep(2)
 
             # Check if process is still running
             if self._port_forward_process.poll() is not None:
@@ -556,7 +558,7 @@ class KubeArchiveEndpointDiscovery:
             logger.error(f"Error setting up port-forward: {e}")
             return None
 
-    def stop_port_forward(self):
+    def stop_port_forward(self) -> None:
         """Stop the port-forward process if running."""
         if self._port_forward_process:
             try:
@@ -578,7 +580,7 @@ class KubeArchiveEndpointDiscovery:
         """Cleanup: stop port-forward process."""
         self.stop_port_forward()
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Clear cached endpoint (useful when endpoint becomes unavailable)."""
         self._cached_endpoint = None
     def get_cached_endpoint(self) -> Optional[str]:
