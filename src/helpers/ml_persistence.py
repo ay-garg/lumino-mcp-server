@@ -1,3 +1,4 @@
+"""Persistent storage for ML models, training data, failure events, and model versioning."""
 # ============================================================================
 # ML PERSISTENCE MODULE
 # ============================================================================
@@ -776,16 +777,21 @@ class TrainingDataStore:
         current_cluster = get_current_cluster_id()
         stats["current_cluster"] = current_cluster
 
-        # Build cluster filter
-        cluster_filter = ""
-        if current_cluster_only:
-            cluster_filter = f" WHERE (cluster_id = '{current_cluster}' OR cluster_id IS NULL)"
+        # Build cluster filter (parameterized to prevent SQL injection)
+        if current_cluster_only and current_cluster:
+            cluster_where = " WHERE (cluster_id = ? OR cluster_id IS NULL)"
+            cluster_and = " AND (cluster_id = ? OR cluster_id IS NULL)"
+            cluster_params = [current_cluster]
+        else:
+            cluster_where = ""
+            cluster_and = ""
+            cluster_params = []
 
         # Log samples stats
-        cursor.execute(f"SELECT COUNT(*) FROM log_samples{cluster_filter}")
+        cursor.execute(f"SELECT COUNT(*) FROM log_samples{cluster_where}", cluster_params)
         stats["total_log_samples"] = cursor.fetchone()[0]
 
-        cursor.execute(f"SELECT COUNT(DISTINCT namespace) FROM log_samples{cluster_filter}")
+        cursor.execute(f"SELECT COUNT(DISTINCT namespace) FROM log_samples{cluster_where}", cluster_params)
         stats["unique_namespaces"] = cursor.fetchone()[0]
 
         # Cluster distribution for log samples
@@ -793,13 +799,13 @@ class TrainingDataStore:
         stats["log_samples_by_cluster"] = {(k or "legacy"): v for k, v in cursor.fetchall()}
 
         # Failure labels stats
-        cursor.execute(f"SELECT COUNT(*) FROM failure_labels{cluster_filter}")
+        cursor.execute(f"SELECT COUNT(*) FROM failure_labels{cluster_where}", cluster_params)
         stats["total_failure_labels"] = cursor.fetchone()[0]
 
-        cursor.execute(f"SELECT failure_type, COUNT(*) FROM failure_labels{cluster_filter.replace('WHERE', 'WHERE 1=1 AND') if cluster_filter else ''} GROUP BY failure_type")
+        cursor.execute(f"SELECT failure_type, COUNT(*) FROM failure_labels{' WHERE 1=1' + cluster_and if cluster_and else ''} GROUP BY failure_type", cluster_params)
         stats["failure_types"] = dict(cursor.fetchall())
 
-        cursor.execute(f"SELECT severity, COUNT(*) FROM failure_labels{cluster_filter.replace('WHERE', 'WHERE 1=1 AND') if cluster_filter else ''} GROUP BY severity")
+        cursor.execute(f"SELECT severity, COUNT(*) FROM failure_labels{' WHERE 1=1' + cluster_and if cluster_and else ''} GROUP BY severity", cluster_params)
         stats["severity_distribution"] = dict(cursor.fetchall())
 
         # Cluster distribution for failure labels
