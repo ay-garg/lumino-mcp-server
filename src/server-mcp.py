@@ -4256,31 +4256,65 @@ async def search_resources_by_labels(
 
 async def _get_k8s_bearer_token() -> Optional[str]:
     """
-    Get bearer token for Prometheus authentication from Kubernetes client config.
+    Get a fresh bearer token for Prometheus authentication.
 
     Fallback chain:
-    1. Extract from configured Kubernetes client (kubeconfig or in-cluster)
-    2. Read from ServiceAccount token file (in-cluster)
-    3. Environment variable (PROMETHEUS_TOKEN, OPENSHIFT_TOKEN, OC_TOKEN)
+    1. Run `oc whoami -t` for a fresh OpenShift token (handles token refresh)
+    2. Re-read kubeconfig for the current token (covers non-oc environments)
+    3. Extract from in-memory Kubernetes client config (last resort)
+    4. Read from ServiceAccount token file (in-cluster)
+    5. Environment variable (PROMETHEUS_TOKEN, OPENSHIFT_TOKEN, OC_TOKEN)
     """
-    # Method 1: Extract token from Kubernetes client configuration
+    # Method 1: Get fresh token via `oc whoami -t` (most reliable for OpenShift)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["oc", "whoami", "-t"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            token = result.stdout.strip()
+            logger.debug("Obtained fresh bearer token via 'oc whoami -t'")
+            return token
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger.debug("oc CLI not available or timed out")
+    except Exception as e:
+        logger.debug(f"Could not get token via oc: {e}")
+
+    # Method 2: Re-read kubeconfig file for current token
+    try:
+        from kubernetes import config as k8s_config_module
+        from kubernetes.client import Configuration, ApiClient
+
+        loader = k8s_config_module.kube_config._get_kube_config_loader()
+        loader.load_and_set(Configuration())
+        fresh_config = Configuration.get_default_copy()
+        if fresh_config.api_key and fresh_config.api_key.get('authorization'):
+            auth_header = fresh_config.api_key['authorization']
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+                logger.debug("Obtained bearer token from re-read kubeconfig")
+                return token
+    except Exception as e:
+        logger.debug(f"Could not re-read kubeconfig: {e}")
+
+    # Method 3: Extract from in-memory Kubernetes client config (may be stale)
     try:
         from kubernetes.client import Configuration
 
         k8s_config = Configuration.get_default_copy()
 
-        # Check for bearer token in the configuration
         if k8s_config.api_key and k8s_config.api_key.get('authorization'):
             auth_header = k8s_config.api_key['authorization']
             if auth_header.startswith('Bearer '):
-                token = auth_header[7:]  # Remove 'Bearer ' prefix
-                logger.info("Successfully obtained bearer token from Kubernetes client config")
+                token = auth_header[7:]
+                logger.debug("Using bearer token from in-memory k8s client config (may be stale)")
                 return token
 
     except Exception as e:
         logger.debug(f"Could not extract token from k8s client config: {e}")
 
-    # Method 2: Read from ServiceAccount token file (in-cluster scenario)
+    # Method 4: Read from ServiceAccount token file (in-cluster scenario)
     SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     try:
         if os.path.exists(SA_TOKEN_PATH):
@@ -4292,7 +4326,7 @@ async def _get_k8s_bearer_token() -> Optional[str]:
     except Exception as e:
         logger.debug(f"Could not read ServiceAccount token: {e}")
 
-    # Method 3: Environment variable fallback
+    # Method 5: Environment variable fallback
     token = os.getenv("PROMETHEUS_TOKEN") or os.getenv("OPENSHIFT_TOKEN") or os.getenv("OC_TOKEN")
     if token:
         logger.info("Using token from environment variable")
