@@ -32,6 +32,23 @@ async def setup_kubearchive_client(
     endpoint_discovery: 'KubeArchiveEndpointDiscovery',
     k8s_core_api: client.CoreV1Api
 ) -> Optional['KubeArchiveClient']:
+    """
+    Initialize and cache the KubeArchive client singleton.
+
+    Discovers the KubeArchive API endpoint via endpoint_discovery and
+    constructs a KubeArchiveClient on first call. The client is cached in
+    the module-level ka_client global, so subsequent calls skip
+    re-discovery and return the same instance.
+
+    Args:
+        endpoint_discovery: Discovery helper used to locate the KubeArchive
+            API endpoint in the cluster.
+        k8s_core_api: Kubernetes CoreV1Api client, passed through to
+            KubeArchiveClient for fetching TLS certificates.
+
+    Returns:
+        The cached KubeArchiveClient, or None if endpoint discovery fails.
+    """
     global ka_client
     if ka_client is None:
         logger.info(f"KubeArchive client is not initialized, setting up...")
