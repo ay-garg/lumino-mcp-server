@@ -8,7 +8,6 @@ for Kubernetes, OpenShift, and Tekton monitoring and analysis.
 import re
 import os
 import json
-import shutil
 import yaml
 import time
 import base64
