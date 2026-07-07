@@ -34,6 +34,8 @@ dependencies = [
     "starlette>=0.30.0",
     "networkx>=3.0",
 ]
+[project.optional-dependencies]
+logan=["logan"]
 
 [project.urls]
 Homepage = "https://github.com/spre-sre/lumino-mcp-server"

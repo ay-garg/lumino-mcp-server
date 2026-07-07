@@ -8,6 +8,7 @@ for Kubernetes, OpenShift, and Tekton monitoring and analysis.
 import re
 import os
 import json
+import shutil
 import yaml
 import time
 import base64
@@ -15,6 +16,8 @@ import asyncio
 import logging
 import requests
 import aiohttp
+import tempfile
+import shutil
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union, Callable
 from mcp.server.fastmcp import FastMCP
@@ -12595,3 +12598,223 @@ async def query_kubearchive(
             except Exception:
                 pass
         return out
+
+async def _run_logan_pipeline(namespace,pod_name,container_name,tail_lines,since_seconds,debug_mode="false"):
+
+    """Shared logic for fetch logs,templatize,and return raw objects."""
+    import logan
+    from logan.preprocessing.preprocessing import Preprocessing
+    from logan.drain.run_drain import Templatizer
+
+
+    logs_result=await get_pod_logs(namespace, pod_name, container_name, tail_lines=tail_lines, since_seconds=since_seconds)
+    if logs_result.get("error"):
+        return None,None,None,logs_result
+
+    log_text="\n".join(logs_result["logs"].values())
+    log_lines=log_text.strip().split("\n")
+
+    tmpdir=tempfile.mkdtemp()
+    input_file=os.path.join(tmpdir, "pod_logs.log")
+    with open(input_file, "w") as f:
+        f.write(log_text)
+
+    
+    output_dir=os.path.join(tmpdir, "output")
+    os.makedirs(output_dir)
+    os.makedirs(os.path.join(output_dir, "developer_debug_files"),exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "metrics"),exist_ok=True)
+
+    os.environ["LOGAN_DISABLE_PANDARALLEL"]="1"
+    os.environ["TOKENIZERS_PARALLELISM"]="false"
+
+    pp=Preprocessing(debug_mode=debug_mode)
+    pp.preprocess([input_file],"all-data",output_dir,False,True,False)
+
+    drain_config=os.path.join(os.path.dirname(logan.__file__), "drain", "drain3.ini")
+
+    templatizer=Templatizer(debug_mode=debug_mode,config_path=drain_config)
+    templatizer.miner(pp.df,output_dir)
+
+    return templatizer.df,output_dir,tmpdir,None
+
+@mcp.tool()
+async def templatize_pod_logs(
+    namespace: str,
+    pod_name: str,
+    container_name: Optional[str]=None,
+    tail_lines: int=5000,
+    since_seconds: Optional[int]=None,
+    debug_mode: str="false",
+)-> Dict[str,Any]:
+    
+    """Cluster pod logs into unique structural templates using Drain3 parse-tree mining.
+
+    Unlike analyze_logs or analyze_pod_logs_hybrid which scan each line individually
+    with regex, this tool groups thousands of repetitive log lines into a handful of
+    distinct patterns (e.g. 10,000 lines → 25 templates). Use this when:
+    - Logs are high-volume and noisy — the user needs to see the forest, not every tree
+    - The user asks to "summarize", "deduplicate", "find patterns", or "reduce" logs
+    - You need to know WHAT kinds of log lines exist and HOW MANY of each, not just errors
+
+    Do NOT use this for quick error scanning — the existing analyze_logs tool is faster
+    for that. Use this when volume reduction and pattern discovery matter.
+
+    Args:
+        namespace: Kubernetes namespace of the pod.
+        pod_name: Name of the pod whose logs to templatize.
+        container_name: Specific container (if the pod has multiple).
+        tail_lines: Number of recent log lines to fetch (default 5000).
+        since_seconds: Only fetch logs newer than this many seconds.
+        debug_mode: "true" to write extra debug artifacts, "false" (default) for lean output.
+
+    Returns:
+        Dict with unique templates sorted by frequency, each with a sample log line.
+        Requires the optional 'logan' dependency — returns a clear error if not installed.
+    """
+    tmpdir=None
+    try:
+        df,output_dir,tmpdir,error= await _run_logan_pipeline(namespace, pod_name, container_name, tail_lines=tail_lines, since_seconds=since_seconds,debug_mode=debug_mode)
+        if error:   
+            return {
+                "status": "error",
+                "error": error,
+                "message": "Failed to templatize pod logs",
+            }
+
+        groups=df.groupby("test_ids").agg(
+            template=("template_str","first"),
+            count=("test_ids","count"),
+            sample=("text","first"),
+        ).reset_index().sort_values(by="count",ascending=False)
+
+        return {
+            "status": "success",
+            "pod":f"{namespace}/{pod_name}",
+            "total_unique_templates": len(groups),
+            "templates": [
+                {
+                    "template_id": str(row["test_ids"]),
+                    "template_str": row["template"],
+                    "occurences": int(row["count"]),
+                    "sample":str(row["sample"])[:200],
+                } for _, row in groups.iterrows()
+                ]
+        }
+    except ImportError as e:
+        return {"status": "error", "error": str(e), "message": "LogAn dependencies not installed"}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "message": str(e)}
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir,ignore_errors=True)
+
+@mcp.tool()
+async def deep_analyze_pod_logs(
+    namespace: str,
+    pod_name: str,
+    container_name: Optional[str]=None,
+    tail_lines: int=5000,
+    since_seconds: Optional[int]=None,
+    debug_mode: str="true",
+)-> Dict[str,Any]:
+    """Classify pod logs into golden signals and fault categories using ML (zero-shot transformer).
+
+    Goes beyond regex error scanning: first clusters logs into templates (Drain3), then
+    classifies each template into a golden signal (Error, Latency, Saturation, Availability,
+    Traffic, Info) and fault category (io, authentication, network, application, device)
+    using a cross-encoder BART model. Use this when:
+    - The user asks for root-cause hints, anomaly classification, or "what's wrong"
+    - You need to distinguish between TYPES of problems (network vs auth vs saturation)
+    - The user wants a golden-signal breakdown of pod health, not just an error list
+    - analyze_logs found errors but the user needs deeper categorization of those errors
+
+    Do NOT use this for quick error checks — it loads an ML model on first call (~30-60s).
+    Prefer analyze_logs or analyze_pod_logs_hybrid for fast, lightweight scanning.
+
+    Args:
+        namespace: Kubernetes namespace of the pod.
+        pod_name: Name of the pod to analyze.
+        container_name: Specific container (if the pod has multiple).
+        tail_lines: Number of recent log lines to fetch (default 5000).
+        since_seconds: Only fetch logs newer than this many seconds.
+        debug_mode: "true" (default) to generate signal map artifacts needed for classification.
+
+    Returns:
+        Dict with golden_signal_distribution (signal → count) and per-template results
+        including golden signal, fault category, occurrence count, and sample log line.
+        Requires the optional 'logan' dependency — returns a clear error if not installed.
+    """
+
+    from logan.log_diagnosis.anomaly import Anomaly
+    from logan.log_diagnosis.models import ModelManager, ModelType
+    from logan.log_diagnosis.models.model_zero_shot_classifer import ZeroShotModels
+
+    tmpdir=None
+    try:
+        df,output_dir,tmpdir,error= await _run_logan_pipeline(namespace, pod_name, container_name, tail_lines=tail_lines, since_seconds=since_seconds,debug_mode=debug_mode)
+
+        if error:
+            return {
+                "status": "error",
+                "error": error,
+                "message": "Failed to deep analyze pod logs",
+            }
+
+        model_enum=ZeroShotModels.CROSSENCODER
+        model_mgr=ModelManager(ModelType.ZERO_SHOT,model_enum)
+
+        anomaly=object.__new__(Anomaly)
+        anomaly.debug_mode="true"
+        anomaly.model_manager=model_mgr
+
+        anomaly_report=anomaly.get_anomaly_report(df,output_dir)
+        signal_map_path=os.path.join(output_dir, "developer_debug_files","temp_id_to_signal_map.json")
+
+        signal_map={}
+        if os.path.exists(signal_map_path):
+            with open(signal_map_path, "r") as f:
+                signal_map=json.load(f)
+
+        gs_distribution={}
+        results=[]
+
+        counts= df.groupby(["test_ids","file_names"]).agg(
+            log_lines=("text","first"),
+            occurrences=("text","size"),
+        ).reset_index()
+
+        for _,row in counts.iterrows():
+            t_id=str(row["test_ids"])
+            f_name=str(row["file_names"])
+            key=str((t_id,f_name))  
+            gs,fault=signal_map.get(key,["Info",["other"]])
+
+            gs_distribution[gs]=gs_distribution.get(gs,0)+int(row["occurrences"])
+
+            results.append({
+                    "template_id": t_id,
+                "file_name": f_name,
+                "log_lines": str(row["log_lines"])[:200],
+                "occurrences": int(row["occurrences"]),
+                "gs": gs,
+                "fault": fault[0] if isinstance(fault,list) and fault else fault,
+            })
+
+        results.sort(key=lambda x: x["occurrences"],reverse=True)
+        return {
+            "status": "success",
+            "pod":f"{namespace}/{pod_name}",
+            "total_log_lines":len(df),
+            "total_unique_templates": df["test_ids"].nunique(),
+            "golden_signal_distribution": gs_distribution,
+            "results": results,
+        }
+
+    except ImportError as e:
+        return {"status": "error", "error": str(e), "message": "LogAn dependencies not installed"}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "message": str(e)}
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir,ignore_errors=True)
