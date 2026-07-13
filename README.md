@@ -32,7 +32,7 @@ An open source MCP (Model Context Protocol) server empowering SREs with intellig
 
 ## Overview
 
-LUMINO MCP Server transforms how Site Reliability Engineers (SREs) and DevOps teams interact with Kubernetes clusters. By exposing 37 specialized tools through the Model Context Protocol, it enables AI assistants to:
+LUMINO MCP Server transforms how Site Reliability Engineers (SREs) and DevOps teams interact with Kubernetes clusters. By exposing 39 specialized tools through the Model Context Protocol, it enables AI assistants to:
 
 - **Monitor** cluster health, resources, and pipeline status in real-time
 - **Analyze** logs, events, and anomalies using statistical and ML techniques
@@ -433,7 +433,7 @@ The server automatically detects Kubernetes configuration:
 | `find_pipeline` | Find pipelines by pattern matching |
 | `get_tekton_pipeline_runs_status` | Cluster-wide pipeline status summary |
 
-### Log Analysis (6 tools)
+### Log Analysis (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -443,6 +443,8 @@ The server automatically detects Kubernetes configuration:
 | `analyze_pod_logs_hybrid` | Combined analysis strategies |
 | `detect_log_anomalies` | Anomaly detection with severity levels |
 | `semantic_log_search` | NLP-based semantic log search |
+| `templatize_pod_logs` | Cluster logs into unique structural templates using Drain3 (requires optional `logan` dependency) |
+| `deep_analyze_pod_logs` | Classify log templates into golden signals and fault categories using zero-shot ML (requires optional `logan` dependency) |
 
 
 ### Event Analysis (3 tools)
@@ -517,7 +519,7 @@ The server automatically detects Kubernetes configuration:
 lumino-mcp-server/
 ├── main.py                 # Entry point with transport detection
 ├── src/
-│   ├── server-mcp.py       # MCP server with all 37 tools
+│   ├── server-mcp.py       # MCP server with all 39 tools
 │   └── helpers/
 │       ├── constants.py    # Shared constants
 │       ├── event_analysis.py    # Event processing logic
